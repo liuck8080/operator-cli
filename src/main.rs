@@ -3,9 +3,12 @@ use ckb_sdk::{
         DefaultCellCollector, DefaultCellDepResolver, DefaultHeaderDepResolver,
         DefaultTransactionDependencyProvider, SecpCkbRawKeySigner,
     },
-    tx_builder::{transfer::CapacityTransferBuilder, unlock_tx, CapacityBalancer, TxBuilder},
+    tx_builder::{
+        balance_tx_capacity, fill_placeholder_witnesses, transfer::CapacityTransferBuilder,
+        unlock_tx, CapacityBalancer, TxBuilder,
+    },
     unlock::{ScriptUnlocker, SecpSighashUnlocker},
-    CkbRpcClient, ScriptId,
+    CkbRpcClient, ScriptId, constants::ONE_CKB,
 };
 use ckb_types::{
     bytes::Bytes,
@@ -108,8 +111,11 @@ struct RoomCfg {
     operator_script_tx_hash: H256,
     operator_script_tx_index: usize,
     host_lock_tx_hash: H256,
-    host_lock_tx_indx: usize,
+    host_lock_tx_index: usize,
     host_lock_args: String,
+
+    rsa_dep_tx_hash: H256,
+    rsa_dep_tx_index: usize,
     /// CKB rpc url, default_value = "http://127.0.0.1:8114")
     ckb_rpc: String,
     /// CKB indexer rpc url, default_value = "http://127.0.0.1:8116")
@@ -119,7 +125,7 @@ impl RoomCfg {
     fn host_lock_hash(&self) -> [u8; 32] {
         let script = self.build_lock_script(
             &self.host_lock_tx_hash,
-            self.host_lock_tx_indx,
+            self.host_lock_tx_index,
             &self.host_lock_args,
         );
 
@@ -251,7 +257,7 @@ fn create(room_cfg: &RoomCfg, room_info: &RoomInfo, create_args: &CreateArgs) {
     // Build the transaction
     let output = CellOutput::new_builder()
         .lock(output_lock_script)
-        .capacity(500u64.pack())
+        .capacity((500u64 * ONE_CKB).pack())
         .type_(Some(placeholder_type_(&room_cfg)).pack())
         .build();
 
@@ -268,20 +274,41 @@ fn create(room_cfg: &RoomCfg, room_info: &RoomInfo, create_args: &CreateArgs) {
     };
 
     let builder = CapacityTransferBuilder::new(vec![(output, Bytes::copy_from_slice(&cell_data))]);
-    let tx = builder
-        .build_balanced(
+    let base_tx = builder
+        .build_base(
             &mut cell_collector,
             &cell_dep_resolver,
             &header_dep_resolver,
             &tx_dep_provider,
-            &balancer,
-            &unlockers,
         )
-        .unwrap();
+        .expect("build base");
+
+    let base_tx = add_cell_dep(
+        base_tx,
+        &[
+            (
+                &create_args.output_lock_tx_hash,
+                create_args.output_lock_index,
+            ),
+            (&room_cfg.rsa_dep_tx_hash, room_cfg.rsa_dep_tx_index),
+        ],
+    );
+
+    let (tx_filled_witnesses, _) =
+        fill_placeholder_witnesses(base_tx, &tx_dep_provider, &unlockers)
+            .expect("fill_placeholder_witnesses");
+
+    let tx = balance_tx_capacity(
+        &tx_filled_witnesses,
+        &balancer,
+        &mut cell_collector,
+        &tx_dep_provider,
+        &cell_dep_resolver,
+        &header_dep_resolver,
+    )
+    .expect("balance_tx_capacity");
 
     let tx = replace_type_script(tx, room_cfg);
-    let json_tx = json_types::TransactionView::from(tx.clone());
-    println!("tx: {}", serde_json::to_string_pretty(&json_tx).unwrap());
     let (new_tx, _new_still_locked_groups) =
         unlock_tx(tx, &tx_dep_provider, &unlockers).expect("unlock transaction");
     assert!(_new_still_locked_groups.is_empty(), "not all unlocked");
@@ -290,23 +317,40 @@ fn create(room_cfg: &RoomCfg, room_info: &RoomInfo, create_args: &CreateArgs) {
         "new_tx: {}",
         serde_json::to_string_pretty(&json_tx).unwrap()
     );
+
+    let outputs_validator = Some(json_types::OutputsValidator::Passthrough);
+    let tx_hash = ckb_client
+        .send_transaction(json_tx.inner, outputs_validator)
+        .expect("send transaction");
+    println!(">>> tx {:#x} sent! <<<", tx_hash);
+}
+
+fn add_cell_dep(base_tx: TransactionView, outs: &[(&H256, usize)]) -> TransactionView {
+    let mut builder = base_tx.as_advanced_builder();
+    for (hash, index) in outs {
+        let cell_dep = {
+            let tx_hash = Byte32::from_slice(hash.as_bytes()).expect("transform tx hash");
+            let out_point = OutPoint::new(tx_hash, *index as u32);
+            CellDep::new_builder().out_point(out_point).build()
+        };
+        builder = builder.cell_dep(cell_dep);
+    }
+    builder.build()
 }
 
 fn replace_type_script(tx: TransactionView, room_cfg: &RoomCfg) -> TransactionView {
     let input = tx.inputs().get(0).expect("get input 0");
     let type_script = build_type_script(input, room_cfg);
-    let output = tx
-        .outputs()
-        .get(0)
-        .expect("get first output")
-        .as_builder()
-        .type_(Some(type_script).pack())
-        .build();
-    let mut outputs_builder = tx.outputs().as_builder();
-    outputs_builder.replace(0, output);
-    let outputs = outputs_builder.build();
+    let outputs: Vec<_> = tx
+        .outputs().into_iter().enumerate().map(|(idx, output)| {
+            if 0 == idx {
+                output.as_builder().type_(Some(type_script.clone()).pack()).build()
+            } else {
+                output
+            }
+        }).collect();
 
-    tx.as_advanced_builder().outputs(outputs).build()
+    tx.as_advanced_builder().set_outputs(outputs).build()
 }
 
 fn placeholder_type_(room_cfg: &RoomCfg) -> Script {

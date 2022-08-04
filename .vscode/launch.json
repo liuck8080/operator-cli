@@ -1,0 +1,63 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug executable 'operator-cli'",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--bin=operator-cli",
+                    "--package=operator-cli"
+                ],
+                "filter": {
+                    "name": "operator-cli",
+                    "kind": "bin"
+                }
+            },
+            "args": [
+                "create",
+                "--output-lock-tx-hash",
+                "e484b6eed1e349054c67d277bc7a9ae05dcdd03b8dfd810a931f770b2059b663",
+                "--output-lock-index",
+                "0",
+                "--output-lock-args",
+                "0xdeadbeef",
+                "--current-count",
+                "0",
+                "--message-price",
+                "100",
+                "--timelock",
+                "1659610718",
+                "--cfg-file",
+                "data/room.json",
+                "--sender-key",
+                "8dadf1939b89919ca74b58fef41c0d4ec70cd6a7b093a0c8ca5b268f93b8181f"
+            ],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in executable 'operator-cli'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--bin=operator-cli",
+                    "--package=operator-cli"
+                ],
+                "filter": {
+                    "name": "operator-cli",
+                    "kind": "bin"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        }
+    ]
+}

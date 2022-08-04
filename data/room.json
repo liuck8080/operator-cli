@@ -200,7 +200,9 @@
   "operator_script_tx_hash":"0xd41147b3b166d1dfe6bbdecf325df1bf15226d2fa657eebfca77f512c7b2ff67",
   "operator_script_tx_index": 0,
   "host_lock_tx_hash":"0xe484b6eed1e349054c67d277bc7a9ae05dcdd03b8dfd810a931f770b2059b663",
-  "host_lock_tx_indx": 0,
+  "host_lock_tx_index": 0,
+  "rsa_dep_tx_hash": "0x5c8ba4ea6eef556e7b11088bc0f6a7ae1c96e186f65907eacc54348fbb642587",
+  "rsa_dep_tx_index": 0,
   "host_lock_args": "deadbeef",
   "ckb_rpc":"http://127.0.0.1:8114",
   "ckb_indexer": "http://127.0.0.1:8116"
