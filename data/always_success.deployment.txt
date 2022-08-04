@@ -1,0 +1,21 @@
+Deployment plan:
+---
+migrated_capacity: 0.0 (CKB)
+new_occupied_capacity: 638.0 (CKB)
+txs_fee_capacity: 0.0001 (CKB)
+total_occupied_capacity: 638.0 (CKB)
+recipe:
+  cells:
+    - name: always_success
+      index: 0
+      tx_hash: "0xe484b6eed1e349054c67d277bc7a9ae05dcdd03b8dfd810a931f770b2059b663"
+      occupied_capacity: 638.0 (CKB)
+      data_hash: "0xd483925160e4232b2cb29f012e8380b7b612d71cf4e79991476b6bcf610735f6"
+      type_id: "0x6e2a0974a0e6bc789f3eaa2dc776112cffeafce8733dd5b6e84a277b23ff28bf"
+  dep_groups: []
+
+Confirm deployment? (Yes/No)
+yes
+Password: 
+(1/1) Sending tx e484b6eed1e349054c67d277bc7a9ae05dcdd03b8dfd810a931f770b2059b663
+Deployment complete

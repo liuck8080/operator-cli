@@ -1,0 +1,21 @@
+Deployment plan:
+---
+migrated_capacity: 0.0 (CKB)
+new_occupied_capacity: 42054.0 (CKB)
+txs_fee_capacity: 1.0 (CKB)
+total_occupied_capacity: 42054.0 (CKB)
+recipe:
+  cells:
+    - name: operator-script
+      index: 0
+      tx_hash: "0xd41147b3b166d1dfe6bbdecf325df1bf15226d2fa657eebfca77f512c7b2ff67"
+      occupied_capacity: 42054.0 (CKB)
+      data_hash: "0x6e1adb0261c97d251cf84691a529071e87e28717b2ce1ea7def75523e9bf48c5"
+      type_id: "0x2250107ef4fe0ac8f8332780cd480321221a8b6c6178618bbcfb2f15f857a89d"
+  dep_groups: []
+
+Confirm deployment? (Yes/No)
+Yes
+Password: 
+(1/1) Sending tx d41147b3b166d1dfe6bbdecf325df1bf15226d2fa657eebfca77f512c7b2ff67
+Deployment complete

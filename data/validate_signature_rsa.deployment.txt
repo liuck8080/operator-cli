@@ -1,0 +1,22 @@
+reate directory "/data/projects/ckb/hackathon/operator/operator-cli/data/migrations/dev"
+Deployment plan:
+---
+migrated_capacity: 0.0 (CKB)
+new_occupied_capacity: 70989.0 (CKB)
+txs_fee_capacity: 1.0 (CKB)
+total_occupied_capacity: 70989.0 (CKB)
+recipe:
+  cells:
+    - name: validate_signature_rsa
+      index: 0
+      tx_hash: "0x5c8ba4ea6eef556e7b11088bc0f6a7ae1c96e186f65907eacc54348fbb642587"
+      occupied_capacity: 70989.0 (CKB)
+      data_hash: "0xc6dd482c635f38ca0f26ba528d35d760540215e1459108a1ede7497282fc169d"
+      type_id: ~
+  dep_groups: []
+
+Confirm deployment? (Yes/No)
+yes
+Password: 
+(1/1) Sending tx 5c8ba4ea6eef556e7b11088bc0f6a7ae1c96e186f65907eacc54348fbb642587
+Deployment complete

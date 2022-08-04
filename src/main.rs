@@ -1,27 +1,43 @@
-use ckb_sdk::CkbRpcClient;
+use ckb_sdk::{
+    traits::{
+        DefaultCellCollector, DefaultCellDepResolver, DefaultHeaderDepResolver,
+        DefaultTransactionDependencyProvider, SecpCkbRawKeySigner,
+    },
+    tx_builder::{transfer::CapacityTransferBuilder, unlock_tx, CapacityBalancer, TxBuilder},
+    unlock::{ScriptUnlocker, SecpSighashUnlocker},
+    CkbRpcClient, ScriptId,
+};
 use ckb_types::{
-    core::ScriptHashType,
-    packed::{Byte32, Script},
-    prelude::*, H256,
+    bytes::Bytes,
+    core::{BlockView, ScriptHashType, TransactionView},
+    h256,
+    packed::{Byte32, CellDep, CellInput, CellOutput, OutPoint, Script, WitnessArgs},
+    prelude::*,
+    H256,
 };
-use rsa::{
-    PublicKeyParts,
-    RsaPrivateKey,
-    RsaPublicKey,
-};
+use lazy_static::lazy_static;
+use rsa::{PublicKeyParts, RsaPrivateKey, RsaPublicKey};
 
-use ckb_hash::blake2b_256;
+use ckb_hash::{blake2b_256, new_blake2b};
 
 use clap::{Args, Parser, Subcommand};
 use serde_derive::{Deserialize, Serialize};
-use std::fs;
+use std::{collections::HashMap, fs};
 
 use ckb_jsonrpc_types as json_types;
+
+pub const SIGHASH_TYPE_HASH: H256 =
+    h256!("0x9bd7e06f3ecf4be0f2fcd2188b23f1b9fcc88e5d4b65a8637b17723bbda3cce8");
+
+lazy_static! {
+    /// The reference to lazily-initialized static secp256k1 engine, used to execute all signature operations
+    pub static ref SECP256K1: secp256k1::Secp256k1<secp256k1::All> = secp256k1::Secp256k1::new();
+}
+
 fn main() {
     let cli = Cli::parse();
     match cli.command {
         Commands::Create(create_args) => {
-            println!("create");
             let room_cfg: RoomCfg =
                 serde_json::from_slice(&fs::read(&create_args.cfg_file).unwrap()).unwrap();
             let room_info = RoomInfo {
@@ -56,6 +72,16 @@ fn main() {
     }
 }
 
+fn skip_0x<'a>(s: &'a str) -> &'a str {
+    if s.len() < 2 {
+        return s;
+    }
+    if s.starts_with("0x") || s.starts_with("0X") {
+        return &s[2..];
+    } else {
+        return s;
+    }
+}
 #[derive(Subcommand)]
 enum Commands {
     /// build omni lock address
@@ -112,9 +138,14 @@ impl RoomCfg {
             tx_hash: lock_tx_hash.clone(),
             index: ckb_jsonrpc_types::Uint32::from(lock_idx as u32),
         };
-        let cell_status = ckb_client.get_live_cell(out_point_json, false).unwrap();
-        let code_hash = cell_status.cell.unwrap().data.unwrap().hash;
-        let args = hex::decode(lock_args).expect("decode host lock args");
+        let cell_status = ckb_client.get_live_cell(out_point_json, true).unwrap();
+        let code_hash = cell_status
+            .cell
+            .expect("get the cell")
+            .data
+            .expect("get data")
+            .hash;
+        let args = hex::decode(skip_0x(lock_args)).expect("decode host lock args");
         Script::new_builder()
             .code_hash(Byte32::from_slice(code_hash.as_bytes()).unwrap())
             .hash_type(ScriptHashType::Data1.into())
@@ -137,7 +168,7 @@ struct RoomArgs {
 #[derive(Args)]
 struct CreateArgs {
     #[clap(long, value_name = "output_lock_hash")]
-    output_lock_hash: H256,
+    output_lock_tx_hash: H256,
     #[clap(long, value_name = "output_lock_index")]
     output_lock_index: usize,
     #[clap(long, value_name = "output_lock_args")]
@@ -150,6 +181,9 @@ struct CreateArgs {
     timelock: u64,
     #[clap(long, value_name = "cfg_file")]
     cfg_file: String,
+    /// The sender private key (hex string)
+    #[clap(long, value_name = "KEY")]
+    sender_key: H256,
 }
 
 #[derive(Args)]
@@ -162,11 +196,151 @@ struct GenKeyPairArgs {
 
 fn create(room_cfg: &RoomCfg, room_info: &RoomInfo, create_args: &CreateArgs) {
     let cell_data = room_info.to_cell_data();
-    let out_lock_script = room_cfg.build_lock_script(
-        &create_args.output_lock_hash,
+    let output_lock_script = room_cfg.build_lock_script(
+        &create_args.output_lock_tx_hash,
         create_args.output_lock_index,
         &create_args.output_lock_args,
     );
+
+    let sender_key = secp256k1::SecretKey::from_slice(create_args.sender_key.as_bytes())
+        .map_err(|err| format!("invalid sender secret key: {}", err))
+        .unwrap();
+    let sender = {
+        let pubkey = secp256k1::PublicKey::from_secret_key(&SECP256K1, &sender_key);
+        let hash160 = blake2b_256(&pubkey.serialize()[..])[0..20].to_vec();
+        Script::new_builder()
+            .code_hash(SIGHASH_TYPE_HASH.pack())
+            .hash_type(ScriptHashType::Type.into())
+            .args(Bytes::from(hash160).pack())
+            .build()
+    };
+
+    let placeholder_witness = WitnessArgs::new_builder()
+        .lock(Some(Bytes::from(vec![0u8; 65])).pack())
+        .build();
+    let balancer = CapacityBalancer::new_simple(sender, placeholder_witness, 1000);
+
+    // Build:
+    //   * CellDepResolver
+    //   * HeaderDepResolver
+    //   * CellCollector
+    //   * TransactionDependencyProvider
+    let mut ckb_client = CkbRpcClient::new(room_cfg.ckb_rpc.as_str());
+    let mut cell_dep_resolver = {
+        let genesis_block = ckb_client.get_block_by_number(0.into()).unwrap().unwrap();
+        DefaultCellDepResolver::from_genesis(&BlockView::from(genesis_block)).unwrap()
+    };
+    let header_dep_resolver = DefaultHeaderDepResolver::new(room_cfg.ckb_rpc.as_str());
+    let mut cell_collector =
+        DefaultCellCollector::new(room_cfg.ckb_indexer.as_str(), room_cfg.ckb_rpc.as_str());
+    let tx_dep_provider = DefaultTransactionDependencyProvider::new(room_cfg.ckb_rpc.as_str(), 10);
+
+    let type_script_placeholder = placeholder_type_(&room_cfg);
+    {
+        let outpoint = OutPoint::new(
+            Byte32::from_slice(room_cfg.operator_script_tx_hash.as_bytes()).unwrap(),
+            (room_cfg.operator_script_tx_index as u32).into(),
+        );
+        let cell_dep = CellDep::new_builder().out_point(outpoint).build();
+        cell_dep_resolver.insert(
+            ScriptId::from(&type_script_placeholder),
+            cell_dep,
+            "operator-script".to_string(),
+        );
+    }
+    // Build the transaction
+    let output = CellOutput::new_builder()
+        .lock(output_lock_script)
+        .capacity(500u64.pack())
+        .type_(Some(placeholder_type_(&room_cfg)).pack())
+        .build();
+
+    let unlockers = {
+        let signer = SecpCkbRawKeySigner::new_with_secret_keys(vec![sender_key]);
+        let sighash_unlocker = SecpSighashUnlocker::from(Box::new(signer) as Box<_>);
+        let sighash_script_id = ScriptId::new_type(SIGHASH_TYPE_HASH.clone());
+        let mut unlockers = HashMap::default();
+        unlockers.insert(
+            sighash_script_id,
+            Box::new(sighash_unlocker) as Box<dyn ScriptUnlocker>,
+        );
+        unlockers
+    };
+
+    let builder = CapacityTransferBuilder::new(vec![(output, Bytes::copy_from_slice(&cell_data))]);
+    let tx = builder
+        .build_balanced(
+            &mut cell_collector,
+            &cell_dep_resolver,
+            &header_dep_resolver,
+            &tx_dep_provider,
+            &balancer,
+            &unlockers,
+        )
+        .unwrap();
+
+    let tx = replace_type_script(tx, room_cfg);
+    let json_tx = json_types::TransactionView::from(tx.clone());
+    println!("tx: {}", serde_json::to_string_pretty(&json_tx).unwrap());
+    let (new_tx, _new_still_locked_groups) =
+        unlock_tx(tx, &tx_dep_provider, &unlockers).expect("unlock transaction");
+    assert!(_new_still_locked_groups.is_empty(), "not all unlocked");
+    let json_tx = json_types::TransactionView::from(new_tx.clone());
+    println!(
+        "new_tx: {}",
+        serde_json::to_string_pretty(&json_tx).unwrap()
+    );
+}
+
+fn replace_type_script(tx: TransactionView, room_cfg: &RoomCfg) -> TransactionView {
+    let input = tx.inputs().get(0).expect("get input 0");
+    let type_script = build_type_script(input, room_cfg);
+    let output = tx
+        .outputs()
+        .get(0)
+        .expect("get first output")
+        .as_builder()
+        .type_(Some(type_script).pack())
+        .build();
+    let mut outputs_builder = tx.outputs().as_builder();
+    outputs_builder.replace(0, output);
+    let outputs = outputs_builder.build();
+
+    tx.as_advanced_builder().outputs(outputs).build()
+}
+
+fn placeholder_type_(room_cfg: &RoomCfg) -> Script {
+    let type_id = vec![0u8; 32];
+    let type_id = Bytes::from(type_id);
+    build_type_script_with_args(type_id, room_cfg)
+}
+
+fn build_type_script(input: CellInput, room_cfg: &RoomCfg) -> Script {
+    let mut blake2b = new_blake2b();
+    blake2b.update(input.as_slice());
+    blake2b.update(&0u64.to_le_bytes()); // output index
+    let mut ret = vec![0u8; 32];
+    blake2b.finalize(&mut ret);
+    let type_id = Bytes::from(ret);
+    build_type_script_with_args(type_id, room_cfg)
+}
+
+fn build_type_script_with_args(type_id: Bytes, room_cfg: &RoomCfg) -> Script {
+    let mut ckb_client = CkbRpcClient::new(room_cfg.ckb_rpc.as_str());
+    let out_point_json = json_types::OutPoint {
+        tx_hash: room_cfg.operator_script_tx_hash.clone(),
+        index: ckb_jsonrpc_types::Uint32::from(room_cfg.operator_script_tx_index as u32),
+    };
+    let cell_status = ckb_client.get_live_cell(out_point_json, true).unwrap();
+    let cell = cell_status.cell.expect("get the operator cell");
+
+    let code_hash = cell.data.expect("get operator data").hash;
+
+    Script::new_builder()
+        .code_hash(Byte32::from_slice(code_hash.as_bytes()).expect("convert code hash to Byte32"))
+        .hash_type(ScriptHashType::Data1.into())
+        .args(type_id.pack())
+        .build()
 }
 
 fn rsa_pubkey_data(pubkey: &RsaPublicKey) -> Vec<u8> {
@@ -230,5 +404,21 @@ impl RoomInfo {
             offset += 20;
         }
         data
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn test_skip_0x() {
+        assert_eq!("deadbeef", skip_0x("0xdeadbeef"));
+        assert_eq!("deadbeef", skip_0x("0Xdeadbeef"));
+        assert_eq!("deadbeef", skip_0x("deadbeef"));
+        assert_eq!("deadbeef", skip_0x("deadbeef"));
+        assert_eq!("de", skip_0x("de"));
+        assert_eq!("de", skip_0x("de"));
+        assert_eq!("", skip_0x("0X"));
+        assert_eq!("", skip_0x("0x"));
     }
 }
